@@ -1,0 +1,562 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test, console} from "forge-std/Test.sol";
+import {KLEDToken} from "../src/KLEDToken.sol";
+import {ConditionalTokens} from "../src/ConditionalTokens.sol";
+import {FutarchyAMM} from "../src/FutarchyAMM.sol";
+import {FutarchyTreasury} from "../src/FutarchyTreasury.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+contract FutarchyTreasuryTest is Test {
+    KLEDToken public kled;
+    ConditionalTokens public conditionalTokens;
+    FutarchyAMM public amm;
+    FutarchyTreasury public treasury;
+
+    address public owner = address(0x1);
+    address public proposer = address(0x2);
+    address public trader1 = address(0x3);
+    address public trader2 = address(0x4);
+    address public recipient = address(0x5);
+
+    uint256 constant INITIAL_SUPPLY = 100_000_000e18;
+    uint256 constant PROPOSAL_STAKE = 10_000e18;
+    uint256 constant MARKET_FUNDING = 50_000e18;
+    uint256 constant TRADER_BALANCE = 100_000e18;
+
+    function setUp() public {
+        vm.startPrank(owner);
+
+        // Deploy KLED token
+        kled = new KLEDToken(owner, INITIAL_SUPPLY);
+
+        // Deploy conditional tokens
+        conditionalTokens = new ConditionalTokens();
+
+        // Deploy AMM
+        amm = new FutarchyAMM(address(conditionalTokens));
+
+        // Deploy treasury
+        treasury = new FutarchyTreasury(
+            address(conditionalTokens),
+            address(amm),
+            address(kled),
+            owner
+        );
+
+        // Configure treasury for testing (10 minute markets)
+        treasury.setMarketDuration(10 minutes);
+        treasury.setProposalStake(PROPOSAL_STAKE);
+        treasury.setMarketFunding(MARKET_FUNDING);
+
+        // Distribute KLED
+        kled.transfer(proposer, PROPOSAL_STAKE + MARKET_FUNDING * 2);
+        kled.transfer(trader1, TRADER_BALANCE);
+        kled.transfer(trader2, TRADER_BALANCE);
+        kled.transfer(address(treasury), MARKET_FUNDING * 10); // Fund treasury for markets
+
+        vm.stopPrank();
+
+        // Approve treasury to spend tokens
+        vm.prank(proposer);
+        kled.approve(address(treasury), type(uint256).max);
+
+        vm.prank(trader1);
+        kled.approve(address(amm), type(uint256).max);
+
+        vm.prank(trader2);
+        kled.approve(address(amm), type(uint256).max);
+    }
+
+    // ============ ConditionalTokens Tests ============
+
+    function test_ConditionalTokens_PrepareCondition() public {
+        bytes32 questionId = keccak256("TEST_QUESTION");
+        bytes32 conditionId = conditionalTokens.prepareCondition(owner, questionId, 2);
+
+        assertEq(conditionalTokens.getOutcomeSlotCount(conditionId), 2);
+        assertFalse(conditionalTokens.isConditionResolved(conditionId));
+    }
+
+    function test_ConditionalTokens_SplitAndMerge() public {
+        vm.startPrank(owner);
+
+        bytes32 questionId = keccak256("TEST_QUESTION");
+        bytes32 conditionId = conditionalTokens.prepareCondition(owner, questionId, 2);
+
+        uint256 splitAmount = 1000e18;
+        kled.approve(address(conditionalTokens), splitAmount);
+
+        uint256 balanceBefore = kled.balanceOf(owner);
+        conditionalTokens.splitPosition(IERC20(address(kled)), conditionId, splitAmount);
+        uint256 balanceAfter = kled.balanceOf(owner);
+
+        assertEq(balanceBefore - balanceAfter, splitAmount);
+
+        // Check outcome token balances
+        bytes32 yesCollectionId = conditionalTokens.getCollectionId(conditionId, 1);
+        bytes32 noCollectionId = conditionalTokens.getCollectionId(conditionId, 2);
+        uint256 yesPositionId = conditionalTokens.getPositionId(IERC20(address(kled)), yesCollectionId);
+        uint256 noPositionId = conditionalTokens.getPositionId(IERC20(address(kled)), noCollectionId);
+
+        assertEq(conditionalTokens.balanceOf(owner, yesPositionId), splitAmount);
+        assertEq(conditionalTokens.balanceOf(owner, noPositionId), splitAmount);
+
+        // Merge back
+        conditionalTokens.mergePositions(IERC20(address(kled)), conditionId, splitAmount);
+        assertEq(kled.balanceOf(owner), balanceBefore);
+
+        vm.stopPrank();
+    }
+
+    function test_ConditionalTokens_ResolveAndRedeem() public {
+        vm.startPrank(owner);
+
+        bytes32 questionId = keccak256("TEST_QUESTION");
+        bytes32 conditionId = conditionalTokens.prepareCondition(owner, questionId, 2);
+
+        uint256 splitAmount = 1000e18;
+        kled.approve(address(conditionalTokens), splitAmount);
+        conditionalTokens.splitPosition(IERC20(address(kled)), conditionId, splitAmount);
+
+        // Resolve condition (YES wins)
+        uint256[] memory payouts = new uint256[](2);
+        payouts[0] = 1; // YES
+        payouts[1] = 0; // NO
+        conditionalTokens.reportPayouts(questionId, payouts);
+
+        assertTrue(conditionalTokens.isConditionResolved(conditionId));
+
+        // Redeem YES tokens (should get full collateral back)
+        uint256[] memory indexSets = new uint256[](1);
+        indexSets[0] = 1; // YES
+        uint256 balanceBefore = kled.balanceOf(owner);
+        conditionalTokens.redeemPositions(IERC20(address(kled)), conditionId, indexSets);
+        uint256 balanceAfter = kled.balanceOf(owner);
+
+        assertEq(balanceAfter - balanceBefore, splitAmount);
+
+        vm.stopPrank();
+    }
+
+    // ============ FutarchyAMM Tests ============
+
+    function test_AMM_CreateMarket() public {
+        vm.startPrank(owner);
+
+        bytes32 questionId = keccak256("AMM_TEST");
+        bytes32 conditionId = conditionalTokens.prepareCondition(owner, questionId, 2);
+
+        kled.approve(address(amm), MARKET_FUNDING);
+        bytes32 marketId = amm.createMarket(
+            conditionId,
+            IERC20(address(kled)),
+            MARKET_FUNDING,
+            1 hours,
+            100 // 1% fee
+        );
+
+        (
+            bytes32 returnedConditionId,
+            address collateralToken,
+            uint256 funding,
+            uint256 yesTokens,
+            uint256 noTokens,
+            uint256 endTime,
+            uint256 fee,
+            bool resolved,
+            uint256 winningOutcome
+        ) = amm.getMarketInfo(marketId);
+
+        assertEq(returnedConditionId, conditionId);
+        assertEq(collateralToken, address(kled));
+        assertEq(funding, MARKET_FUNDING);
+        assertEq(yesTokens, MARKET_FUNDING);
+        assertEq(noTokens, MARKET_FUNDING);
+        assertFalse(resolved);
+
+        vm.stopPrank();
+    }
+
+    function test_AMM_BuyAndSell() public {
+        vm.startPrank(owner);
+
+        bytes32 questionId = keccak256("TRADE_TEST");
+        bytes32 conditionId = conditionalTokens.prepareCondition(owner, questionId, 2);
+
+        kled.approve(address(amm), MARKET_FUNDING);
+        bytes32 marketId = amm.createMarket(
+            conditionId,
+            IERC20(address(kled)),
+            MARKET_FUNDING,
+            1 hours,
+            100
+        );
+
+        vm.stopPrank();
+
+        // Trader1 buys YES tokens
+        vm.startPrank(trader1);
+
+        uint256 investAmount = 100e18;
+        uint256 expectedTokens = amm.calcBuyAmount(marketId, 0, investAmount);
+
+        uint256 balanceBefore = kled.balanceOf(trader1);
+        amm.buy(marketId, 0, investAmount, 0);
+        uint256 balanceAfter = kled.balanceOf(trader1);
+
+        assertEq(balanceBefore - balanceAfter, investAmount);
+
+        // Check YES price increased
+        uint256 yesPrice = amm.getPrice(marketId, 0);
+        assertGt(yesPrice, 5e17); // > 50%
+
+        vm.stopPrank();
+    }
+
+    function test_AMM_PriceMovement() public {
+        vm.startPrank(owner);
+
+        bytes32 questionId = keccak256("PRICE_TEST");
+        bytes32 conditionId = conditionalTokens.prepareCondition(owner, questionId, 2);
+
+        kled.approve(address(amm), MARKET_FUNDING);
+        bytes32 marketId = amm.createMarket(
+            conditionId,
+            IERC20(address(kled)),
+            MARKET_FUNDING,
+            1 hours,
+            100
+        );
+
+        vm.stopPrank();
+
+        // Initial prices should be 50/50
+        uint256 initialYesPrice = amm.getPrice(marketId, 0);
+        uint256 initialNoPrice = amm.getPrice(marketId, 1);
+        assertEq(initialYesPrice, 5e17); // 50%
+        assertEq(initialNoPrice, 5e17); // 50%
+
+        // Large buy on YES should significantly move price
+        vm.startPrank(trader1);
+        amm.buy(marketId, 0, 500e18, 0);
+        vm.stopPrank();
+
+        uint256 newYesPrice = amm.getPrice(marketId, 0);
+        uint256 newNoPrice = amm.getPrice(marketId, 1);
+
+        assertGt(newYesPrice, initialYesPrice);
+        assertLt(newNoPrice, initialNoPrice);
+        assertApproxEqAbs(newYesPrice + newNoPrice, 1e18, 2); // Prices sum to ~100% (allow rounding)
+    }
+
+    // ============ FutarchyTreasury Tests ============
+
+    function test_Treasury_Deposit() public {
+        vm.startPrank(trader1);
+
+        uint256 depositAmount = 10_000e18;
+        kled.approve(address(treasury), depositAmount);
+
+        uint256 balanceBefore = treasury.getTreasuryBalance(address(kled));
+        treasury.deposit(address(kled), depositAmount);
+        uint256 balanceAfter = treasury.getTreasuryBalance(address(kled));
+
+        assertEq(balanceAfter - balanceBefore, depositAmount);
+
+        vm.stopPrank();
+    }
+
+    function test_Treasury_CreateProposal() public {
+        // First deposit to treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.startPrank(proposer);
+
+        uint256 proposerBalanceBefore = kled.balanceOf(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Fund Marketing Campaign",
+            "Spend 10,000 KLED on SF advertising",
+            10_000e18,
+            recipient,
+            address(kled)
+        );
+        uint256 proposerBalanceAfter = kled.balanceOf(proposer);
+
+        // Stake should be taken
+        assertEq(proposerBalanceBefore - proposerBalanceAfter, PROPOSAL_STAKE);
+
+        FutarchyTreasury.TreasuryProposal memory proposal = treasury.getProposal(proposalId);
+        assertEq(proposal.id, 1);
+        assertEq(proposal.proposer, proposer);
+        assertEq(proposal.amount, 10_000e18);
+        assertEq(proposal.recipient, recipient);
+        assertFalse(proposal.resolved);
+        assertFalse(proposal.executed);
+
+        vm.stopPrank();
+    }
+
+    function test_Treasury_ResolveProposal_PassWins() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Fund Marketing",
+            "Marketing spend",
+            10_000e18,
+            recipient,
+            address(kled)
+        );
+
+        FutarchyTreasury.TreasuryProposal memory proposal = treasury.getProposal(proposalId);
+
+        // Trader1 buys YES heavily (betting proposal will increase KLED value)
+        vm.startPrank(trader1);
+        kled.approve(address(amm), 20_000e18);
+        amm.buy(proposal.marketId, 0, 20_000e18, 0); // Buy YES
+        vm.stopPrank();
+
+        // Trader2 buys some NO
+        vm.startPrank(trader2);
+        kled.approve(address(amm), 5_000e18);
+        amm.buy(proposal.marketId, 1, 5_000e18, 0); // Buy NO
+        vm.stopPrank();
+
+        // Fast forward past market end
+        vm.warp(block.timestamp + 11 minutes);
+
+        // Check prices before resolution
+        uint256 passPrice = amm.getPrice(proposal.marketId, 0);
+        uint256 failPrice = amm.getPrice(proposal.marketId, 1);
+        console.log("Pass price:", passPrice);
+        console.log("Fail price:", failPrice);
+
+        // Resolve proposal
+        treasury.resolveProposal(proposalId);
+
+        proposal = treasury.getProposal(proposalId);
+        assertTrue(proposal.resolved);
+        assertTrue(proposal.passed); // YES had more buying pressure
+        assertGt(proposal.passPrice, proposal.failPrice);
+    }
+
+    function test_Treasury_ExecuteProposal() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Fund Dev",
+            "Development funding",
+            5_000e18,
+            recipient,
+            address(kled)
+        );
+
+        FutarchyTreasury.TreasuryProposal memory proposal = treasury.getProposal(proposalId);
+
+        // Make YES win by buying heavily
+        vm.startPrank(trader1);
+        kled.approve(address(amm), 30_000e18);
+        amm.buy(proposal.marketId, 0, 30_000e18, 0);
+        vm.stopPrank();
+
+        // Fast forward and resolve
+        vm.warp(block.timestamp + 11 minutes);
+        treasury.resolveProposal(proposalId);
+
+        // Execute
+        uint256 recipientBalanceBefore = kled.balanceOf(recipient);
+        treasury.executeProposal(proposalId);
+        uint256 recipientBalanceAfter = kled.balanceOf(recipient);
+
+        assertEq(recipientBalanceAfter - recipientBalanceBefore, 5_000e18);
+
+        proposal = treasury.getProposal(proposalId);
+        assertTrue(proposal.executed);
+    }
+
+    function test_Treasury_CancelProposal() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Cancel Test",
+            "Will be canceled",
+            1_000e18,
+            recipient,
+            address(kled)
+        );
+
+        // Cancel (should return half stake)
+        uint256 balanceBefore = kled.balanceOf(proposer);
+        vm.prank(proposer);
+        treasury.cancelProposal(proposalId);
+        uint256 balanceAfter = kled.balanceOf(proposer);
+
+        assertEq(balanceAfter - balanceBefore, PROPOSAL_STAKE / 2);
+
+        FutarchyTreasury.TreasuryProposal memory proposal = treasury.getProposal(proposalId);
+        assertTrue(proposal.canceled);
+    }
+
+    function test_Treasury_ResolveProposal_FailWins() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Bad Proposal",
+            "Market will reject",
+            10_000e18,
+            recipient,
+            address(kled)
+        );
+
+        FutarchyTreasury.TreasuryProposal memory proposal = treasury.getProposal(proposalId);
+
+        // Trader1 buys NO heavily (betting proposal will hurt KLED value)
+        vm.startPrank(trader1);
+        kled.approve(address(amm), 25_000e18);
+        amm.buy(proposal.marketId, 1, 25_000e18, 0); // Buy NO
+        vm.stopPrank();
+
+        // Fast forward past market end
+        vm.warp(block.timestamp + 11 minutes);
+
+        // Resolve proposal
+        treasury.resolveProposal(proposalId);
+
+        proposal = treasury.getProposal(proposalId);
+        assertTrue(proposal.resolved);
+        assertFalse(proposal.passed); // NO won
+        assertGt(proposal.failPrice, proposal.passPrice);
+    }
+
+    function test_Treasury_CannotExecuteFailedProposal() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Failed Proposal",
+            "Will fail",
+            10_000e18,
+            recipient,
+            address(kled)
+        );
+
+        FutarchyTreasury.TreasuryProposal memory proposal = treasury.getProposal(proposalId);
+
+        // Make NO win
+        vm.startPrank(trader1);
+        kled.approve(address(amm), 30_000e18);
+        amm.buy(proposal.marketId, 1, 30_000e18, 0);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 11 minutes);
+        treasury.resolveProposal(proposalId);
+
+        // Try to execute - should fail
+        vm.expectRevert("Proposal did not pass");
+        treasury.executeProposal(proposalId);
+    }
+
+    // ============ Access Control Tests ============
+
+    function test_Treasury_OnlyOwnerCanSetParameters() public {
+        vm.prank(trader1);
+        vm.expectRevert();
+        treasury.setMarketDuration(1 hours);
+
+        vm.prank(owner);
+        treasury.setMarketDuration(1 hours);
+        assertEq(treasury.marketDuration(), 1 hours);
+    }
+
+    function test_Treasury_OnlyProposerCanCancel() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        // Create proposal
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Test",
+            "Test",
+            1_000e18,
+            recipient,
+            address(kled)
+        );
+
+        // Non-proposer cannot cancel
+        vm.prank(trader1);
+        vm.expectRevert("Not proposer");
+        treasury.cancelProposal(proposalId);
+    }
+
+    // ============ Edge Cases ============
+
+    function test_Treasury_CannotCreateWithInsufficientBalance() public {
+        // Try to create proposal for more than treasury balance
+        vm.prank(proposer);
+        vm.expectRevert("Insufficient treasury");
+        treasury.createProposal(
+            "Too Much",
+            "More than treasury has",
+            1_000_000_000e18,
+            recipient,
+            address(kled)
+        );
+    }
+
+    function test_Treasury_CannotResolveBeforeEnd() public {
+        // Setup treasury
+        vm.startPrank(trader1);
+        kled.approve(address(treasury), 50_000e18);
+        treasury.deposit(address(kled), 50_000e18);
+        vm.stopPrank();
+
+        vm.prank(proposer);
+        uint256 proposalId = treasury.createProposal(
+            "Early Resolve",
+            "Try to resolve early",
+            1_000e18,
+            recipient,
+            address(kled)
+        );
+
+        vm.expectRevert("Market still active");
+        treasury.resolveProposal(proposalId);
+    }
+}

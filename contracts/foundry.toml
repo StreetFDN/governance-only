@@ -1,0 +1,63 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+
+# Ignore OpenZeppelin test and certora files
+ignore = [
+    "lib/openzeppelin-contracts/test/**",
+    "lib/openzeppelin-contracts/certora/**",
+    "lib/openzeppelin-contracts/scripts/**",
+]
+
+# Solidity compiler settings
+solc = "0.8.24"
+evm_version = "cancun"
+via_ir = true
+
+# Optimizer settings
+optimizer = true
+optimizer_runs = 200
+
+# Testing settings
+fuzz = { runs = 256 }
+invariant = { runs = 256, depth = 15 }
+
+# Remappings for OpenZeppelin
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+]
+
+# Base chain settings
+[profile.base]
+evm_version = "cancun"
+
+[profile.base-sepolia]
+evm_version = "cancun"
+
+# RPC endpoints (use environment variables in practice)
+[rpc_endpoints]
+localhost = "http://localhost:8545"
+base = "${BASE_RPC_URL}"
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+
+# Etherscan verification
+[etherscan]
+base = { key = "${BASESCAN_API_KEY}", url = "https://api.basescan.org/api" }
+base_sepolia = { key = "${BASESCAN_API_KEY}", url = "https://api-sepolia.basescan.org/api" }
+
+# Formatter settings
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+multiline_func_header = "all"
+quote_style = "double"
+number_underscore = "thousands"
+wrap_comments = true
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
