@@ -7,15 +7,22 @@ import {
   darkTheme,
 } from '@rainbow-me/rainbowkit';
 import { WagmiProvider } from 'wagmi';
-import { mainnet, sepolia } from 'wagmi/chains';
+import { base, baseSepolia, mainnet } from 'wagmi/chains';
 import { QueryClientProvider, QueryClient } from "@tanstack/react-query";
 
+// Base Sepolia for development, Base for production
 const config = getDefaultConfig({
   appName: 'Street Governance',
   projectId: 'YOUR_PROJECT_ID', // Get a free one at cloud.walletconnect.com
-  chains: [mainnet, sepolia],
+  chains: [baseSepolia, base, mainnet], // Base Sepolia first for testnet
   ssr: true,
 });
+
+// Export chain IDs for network gating
+export const SUPPORTED_CHAINS = {
+  BASE: base.id,
+  BASE_SEPOLIA: baseSepolia.id,
+} as const;
 
 const queryClient = new QueryClient();
 

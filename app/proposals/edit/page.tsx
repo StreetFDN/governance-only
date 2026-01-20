@@ -1,25 +1,43 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { 
-  ArrowLeft, 
-  Lock, 
-  MessageSquarePlus, 
-  User, 
-  X, 
-  ThumbsUp, 
-  ThumbsDown, 
-  Wallet, 
+import {
+  ArrowLeft,
+  Lock,
+  MessageSquarePlus,
+  User,
+  X,
+  ThumbsUp,
+  ThumbsDown,
+  Wallet,
   Clock,
-  // Added missing imports here
   Twitter,
-  Globe
+  Globe,
+  Loader2,
+  AlertTriangle,
 } from 'lucide-react';
 import PhysicsFooter from '@/components/PhysicsFooter';
 import ThemeToggle from '@/components/ThemeToggle';
-import { useAccount, useWriteContract } from 'wagmi';
+import { useAccount, useSwitchChain } from 'wagmi';
+import {
+  useProposal,
+  useProposalCount,
+  useSuggestionCount,
+  useSuggestion,
+  useUserGovernance,
+  useProposeEdit,
+  useVoteOnSuggestion,
+  useChainCheck,
+  useEditStake,
+  GOVERNANCE_CONFIG,
+  REQUIRED_CHAIN_ID,
+  formatKled,
+  formatTimestamp,
+} from '@/app/hooks/useGovernance';
+import { keccak256, toBytes } from 'viem';
 
 // --- THEME OBSERVER HOOK ---
 function useThemeObserver() {
@@ -33,9 +51,9 @@ function useThemeObserver() {
       setTheme(getTheme());
     });
 
-    observer.observe(document.documentElement, { 
-      attributes: true, 
-      attributeFilter: ['data-theme'] 
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme']
     });
 
     return () => observer.disconnect();
@@ -44,75 +62,120 @@ function useThemeObserver() {
   return theme;
 }
 
-// --- MOCK SMART CONTRACT CONFIG ---
-const GOVERNANCE_CONTRACT_ADDRESS = "0x1234567890123456789012345678901234567890";
-const MOCK_ABI = [
-    { name: 'voteOnSuggestion', type: 'function', inputs: [{ type: 'uint256', name: 'id' }, { type: 'bool', name: 'support' }] },
-    { name: 'proposeEdit', type: 'function', inputs: [{ type: 'string', name: 'original' }, { type: 'string', name: 'proposed' }] }
-];
-
 // --- TIME GOVERNANCE SETTINGS ---
-const PUBLISHED_AT = new Date(Date.now() - (20 * 60 * 60 * 1000)).getTime(); 
-const EDITING_WINDOW_HOURS = 48; 
+const EDITING_WINDOW_HOURS = 48;
 const VOTING_WINDOW_HOURS = 72;
 
-// --- DOCUMENT CONTENT ---
-const DOC_TITLE = "Fire Avi Patel as CEO";
-const PARAGRAPHS = [
-  { id: 'p1', text: "This proposal discusses relieving Avi Patel, the current CEO from his active duties and reinstating the CEO role with Robert Chang as his replacement. This action is considered critical for the next phase of growth." },
-  { id: 'p2', text: "Despite consistent updates, the token price has shown volatility. Wintermute, as the designated market maker, has not provided sufficient buy-side liquidity during the recent dip." },
-  { id: 'p3', text: "We propose an immediate governance vote to execute this transition, ensuring stability and renewed confidence in the protocol's leadership." }
-];
+function ProposalEditorContent() {
+  const searchParams = useSearchParams();
+  const proposalIdParam = searchParams.get('id');
 
-const MIN_HOLDING_AMOUNT = 10000;
-const STAKE_REQUIRED = 500;
-
-export default function ProposalEditor() {
-  const { isConnected } = useAccount();
-  const [userBalance, setUserBalance] = useState(15420); 
+  const { isConnected, address } = useAccount();
+  const { switchChain } = useSwitchChain();
   const [isClient, setIsClient] = useState(false);
   const currentTheme = useThemeObserver();
 
-  // --- GOVERNANCE TIME STATE ---
-  const [hoursSincePublish, setHoursSincePublish] = useState(0);
+  // Governance hooks
+  const { balance, formattedBalance, formattedVotingPower, canSuggestEdit, isLoading: isGovernanceLoading } = useUserGovernance();
+  const { isCorrectNetwork, requiredChainName } = useChainCheck();
+  const { data: editStake } = useEditStake();
+
+  // Get proposal count to default to latest
+  const { data: proposalCount } = useProposalCount();
+  const proposalId = proposalIdParam
+    ? BigInt(proposalIdParam)
+    : (proposalCount && proposalCount > BigInt(0) ? proposalCount : BigInt(1));
+
+  // Fetch proposal data
+  const { data: proposal, isLoading: isProposalLoading, refetch: refetchProposal } = useProposal(proposalId);
+
+  // Fetch suggestions for this proposal
+  const { data: suggestionCount } = useSuggestionCount();
+  const { data: suggestion1 } = useSuggestion(BigInt(1));
+  const { data: suggestion2 } = useSuggestion(BigInt(2));
+  const { data: suggestion3 } = useSuggestion(BigInt(3));
+
+  // Build suggestions array from fetched data
+  // Tuple format: [proposalId, suggester, originalHash, proposedText, forVotes, againstVotes, finalized, accepted]
+  const suggestionData = [
+    { id: BigInt(1), data: suggestion1 },
+    { id: BigInt(2), data: suggestion2 },
+    { id: BigInt(3), data: suggestion3 },
+  ];
+  const allSuggestions = suggestionData
+    .filter(s => s.data && s.data[0] === proposalId) // data[0] is proposalId
+    .map(s => ({
+      id: s.id.toString(),
+      original: '', // Would need to store original text hash mapping
+      proposed: s.data![3], // data[3] is proposedText
+      author: `${s.data![1].slice(0, 6)}...${s.data![1].slice(-4)}`, // data[1] is suggester
+      stake: Number(s.data![4]) / 1e18, // Using forVotes index as approximate stake
+      votes: { yes: Number(s.data![4]) / 1e18, no: Number(s.data![5]) / 1e18 }, // data[4]=forVotes, data[5]=againstVotes
+      status: s.data![6] ? 'RESOLVED' : 'ACTIVE', // data[6] is finalized
+    }));
+
+  // Propose edit hook
+  const { proposeEdit, isPending: isProposePending, isConfirming: isProposeConfirming, isSuccess: proposeSuccess } = useProposeEdit();
+
+  // Vote on suggestion hook
+  const { vote: voteOnSuggestion, isPending: isVotePending, isConfirming: isVoteConfirming, isSuccess: voteSuccess } = useVoteOnSuggestion();
 
   // --- EDITOR STATE ---
-  const [suggestions, setSuggestions] = useState<any[]>([
-      {
-          id: "1",
-          original: "Robert Chang",
-          proposed: "CZ",
-          author: "0xB2...9A",
-          stake: 500,
-          votes: { yes: 322600, no: 412900 },
-          status: "ACTIVE"
-      }
-  ]);
-  const [activeSuggestionId, setActiveSuggestionId] = useState<string | null>("1");
+  const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [activeSuggestionId, setActiveSuggestionId] = useState<string | null>(null);
 
   const [selectionRange, setSelectionRange] = useState<Range | null>(null);
   const [selectionText, setSelectionText] = useState("");
   const [draftText, setDraftText] = useState("");
-  
+
   // Modals
   const [showProposeModal, setShowProposeModal] = useState(false);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
   const contentRef = useRef<HTMLDivElement>(null);
 
-  // Wagmi Hook
-  const { writeContract, isPending } = useWriteContract();
+  // Sync suggestions from chain
+  useEffect(() => {
+    if (allSuggestions.length > 0) {
+      setSuggestions(allSuggestions);
+      if (!activeSuggestionId && allSuggestions.length > 0) {
+        setActiveSuggestionId(allSuggestions[0].id);
+      }
+    }
+  }, [allSuggestions.length]);
+
+  // User balance from chain
+  const userBalance = balance ? Number(balance) / 1e18 : 0;
+  const MIN_HOLDING_AMOUNT = Number(GOVERNANCE_CONFIG.MIN_VOTING_POWER) / 1e18;
+  const STAKE_REQUIRED = editStake ? Number(editStake) / 1e18 : 500;
 
   useEffect(() => {
     setIsClient(true);
-    const diff = (Date.now() - PUBLISHED_AT) / (1000 * 60 * 60);
-    setHoursSincePublish(diff);
   }, []);
 
-  // Derived Logic
-  const isNewProposalsAllowed = hoursSincePublish < EDITING_WINDOW_HOURS;
-  const isVotingOpen = hoursSincePublish < VOTING_WINDOW_HOURS;
-  const isEligible = isConnected && userBalance >= MIN_HOLDING_AMOUNT;
+  // Derived Logic - based on proposal timestamps from chain
+  // Tuple format: [proposer, title, description, forVotes, againstVotes, abstainVotes, startTime, endTime, currentState]
+  const now = Math.floor(Date.now() / 1000);
+  const proposalStartTime = proposal ? Number(proposal[6]) : now; // proposal[6] = startTime
+  const proposalEndTime = proposal ? Number(proposal[7]) : now; // proposal[7] = endTime
+
+  // Edit window is before voting starts
+  const isNewProposalsAllowed = proposal ? now < proposalStartTime : false;
+
+  // Calculate hours remaining in edit window (time until voting starts)
+  const hoursUntilVoting = proposal ? Math.max(0, (proposalStartTime - now) / 3600) : 0;
+  const hoursSincePublish = EDITING_WINDOW_HOURS - hoursUntilVoting;
+
+  // Voting is open during the voting period
+  const isVotingOpen = proposal ? (now >= proposalStartTime && now <= proposalEndTime) : false;
+
+  const isEligible = isConnected && isCorrectNetwork && userBalance >= MIN_HOLDING_AMOUNT;
+
+  // Get proposal content
+  const DOC_TITLE = proposal ? proposal[1] : 'Loading...'; // proposal[1] = title
+  const PARAGRAPHS = proposal
+    ? [{ id: 'p1', text: proposal[2] }] // proposal[2] = description
+    : [{ id: 'p1', text: 'Loading proposal content...' }];
 
   // 1. Handle Text Selection
   const handleMouseUp = () => {
@@ -131,27 +194,47 @@ export default function ProposalEditor() {
   // 2. Click "Suggest" Button
   const handleSuggestClick = () => {
     if (!isConnected) {
-        setShowAuthModal(true); 
+        setShowAuthModal(true);
         setSelectionRange(null);
         return;
     }
 
+    if (!isCorrectNetwork) {
+        alert(`Please switch to ${requiredChainName}`);
+        return;
+    }
+
     if (!isNewProposalsAllowed) {
-        alert("The 48-hour window for new suggestions has closed.");
+        alert("The editing window for suggestions has closed. Voting has started.");
         setSelectionRange(null);
         return;
     }
 
     if (userBalance < MIN_HOLDING_AMOUNT) {
-        alert(`Insufficient Balance. You need ${MIN_HOLDING_AMOUNT} KLED to edit.`);
+        alert(`Insufficient Balance. You need ${MIN_HOLDING_AMOUNT.toLocaleString()} KLED to edit.`);
         return;
     }
+
+    if (!canSuggestEdit) {
+        alert(`Insufficient Balance. You need ${STAKE_REQUIRED.toLocaleString()} KLED to stake for an edit.`);
+        return;
+    }
+
     setShowProposeModal(true);
-    setSelectionRange(null); 
+    setSelectionRange(null);
   };
 
-  // 3. Submit Proposal Logic
+  // 3. Submit Proposal Logic - calls real contract
   const submitProposal = () => {
+      if (!proposalId || !selectionText || !draftText) return;
+
+      // Hash the original text for on-chain verification
+      const originalHash = keccak256(toBytes(selectionText));
+
+      // Call the contract
+      proposeEdit(proposalId, originalHash, draftText);
+
+      // Optimistically add to UI while waiting for confirmation
       const newId = Date.now().toString();
       const newSuggestion = {
           id: newId,
@@ -161,16 +244,20 @@ export default function ProposalEditor() {
           stake: STAKE_REQUIRED,
           date: new Date().toLocaleDateString(),
           votes: { yes: 0, no: 0 },
-          status: "ACTIVE"
+          status: "PENDING"
       };
-      
+
       setSuggestions([newSuggestion, ...suggestions]);
       setShowProposeModal(false);
       setActiveSuggestionId(newId);
   };
 
-  // 4. Voting Logic
+  // 4. Voting Logic - calls real contract
   const handleVote = (id: string, type: 'yes' | 'no') => {
+      // Call contract to vote
+      voteOnSuggestion(BigInt(id), type === 'yes');
+
+      // Optimistic UI update
       setSuggestions(suggestions.map(s => {
           if (s.id === id) {
               return {
@@ -365,17 +452,24 @@ export default function ProposalEditor() {
                 </div>
 
                 {/* Suggestion List */}
-                {suggestions.map((suggestion) => (
-                    <SuggestionCard 
-                        key={suggestion.id} 
-                        suggestion={suggestion} 
-                        userBalance={userBalance}
-                        isActive={activeSuggestionId === suggestion.id}
-                        isVotingOpen={isVotingOpen}
-                        onClick={() => setActiveSuggestionId(suggestion.id)}
-                        onVote={(type) => handleVote(suggestion.id, type)}
-                    />
-                ))}
+                {suggestions.length === 0 ? (
+                    <div className="text-center py-8 text-street-muted text-sm">
+                        No edit suggestions yet
+                    </div>
+                ) : (
+                    suggestions.map((suggestion) => (
+                        <SuggestionCard
+                            key={suggestion.id}
+                            suggestion={suggestion}
+                            userBalance={userBalance}
+                            isActive={activeSuggestionId === suggestion.id}
+                            isVotingOpen={isVotingOpen}
+                            onClick={() => setActiveSuggestionId(suggestion.id)}
+                            onVote={(type) => handleVote(suggestion.id, type)}
+                            isPending={isVotePending || isVoteConfirming}
+                        />
+                    ))
+                )}
             </div>
         </div>
 
@@ -523,24 +617,23 @@ export default function ProposalEditor() {
 }
 
 // --- SUGGESTION CARD (With Web3 Voting) ---
-function SuggestionCard({ 
-    suggestion, 
-    isActive, 
+function SuggestionCard({
+    suggestion,
+    isActive,
     userBalance,
     isVotingOpen,
     onClick,
-    onVote
-}: { 
-    suggestion: any, 
-    isActive: boolean, 
+    onVote,
+    isPending,
+}: {
+    suggestion: any,
+    isActive: boolean,
     userBalance: number,
     isVotingOpen: boolean,
     onClick: () => void,
-    onVote: (type: 'yes' | 'no') => void
+    onVote: (type: 'yes' | 'no') => void,
+    isPending?: boolean,
 }) {
-    // Web3 Hook for writing
-    const { writeContract, isPending } = useWriteContract();
-    
     // Calculate Vote Stats
     const totalVotes = suggestion.votes.yes + suggestion.votes.no;
     const yesPercent = totalVotes > 0 ? (suggestion.votes.yes / totalVotes) * 100 : 0;
@@ -548,24 +641,8 @@ function SuggestionCard({
 
     const handleOnChainVote = async (support: boolean) => {
         if(!isVotingOpen) return;
-        
-        try {
-            console.log(`Voting ${support ? 'YES' : 'NO'} on proposal ${suggestion.id}`);
-            
-            // Trigger Wallet (Mocked Contract Call)
-            writeContract({
-                address: GOVERNANCE_CONTRACT_ADDRESS,
-                abi: MOCK_ABI,
-                functionName: 'voteOnSuggestion',
-                args: [BigInt(suggestion.id), support]
-            });
-
-            // Update local state (optimistic)
-            onVote(support ? 'yes' : 'no');
-
-        } catch (err) {
-            console.error("Voting failed", err);
-        }
+        // Call parent handler which now calls the real contract
+        onVote(support ? 'yes' : 'no');
     };
 
     return (
@@ -660,4 +737,17 @@ function SuggestionCard({
             </div>
         </div>
     )
+}
+
+// --- MAIN EXPORT WITH SUSPENSE BOUNDARY ---
+export default function ProposalEditor() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-street-background">
+        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-street-muted"></div>
+      </div>
+    }>
+      <ProposalEditorContent />
+    </Suspense>
+  );
 }

@@ -2,12 +2,31 @@
 
 import { useState, useEffect } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
-import { Globe, Twitter, ShieldCheck, ArrowRight, FileText, Wallet, ExternalLink, Copy, CheckCircle2, AlertTriangle, ShieldAlert, Loader2 } from 'lucide-react';
+import { Globe, Twitter, ShieldCheck, ArrowRight, FileText, Wallet, ExternalLink, Copy, CheckCircle2, AlertTriangle, ShieldAlert, Loader2, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import PhysicsFooter from '@/components/PhysicsFooter';
 import ThemeToggle from '@/components/ThemeToggle';
-import { useAccount } from 'wagmi';
+import { useAccount, useSwitchChain } from 'wagmi';
+import {
+  useUserGovernance,
+  useProposalCount,
+  useProposal,
+  useAllProposals,
+  formatKled,
+  useChainCheck,
+  REQUIRED_CHAIN_ID,
+  ProposalState,
+  getProposalStateLabel,
+  getProposalStatus,
+  formatTimestamp,
+  getTimeRemaining,
+} from '@/app/hooks/useGovernance';
+import {
+  useAllFutarchyProposals,
+  formatTimeRemaining,
+  formatPriceAsPercent,
+} from '@/app/hooks/useFutarchyTreasury';
 
 // --- THEME OBSERVER HOOK ---
 function useThemeObserver() {
@@ -32,36 +51,6 @@ function useThemeObserver() {
   return theme;
 }
 
-// Kled-Specific Past Proposals
-const PAST_PROPOSALS = [
-  { id: 1, title: "Sell KLED to a16z OTC", status: "FAILED" },
-  { id: 2, title: "Do a partnership with OpenDroids", status: "FAILED" },
-  { id: 3, title: "Cut Avi Patels paycheck by half", status: "PASSED" },
-];
-
-// Futarchy Treasury Proposals
-const TREASURY_PROPOSALS = [
-  { 
-    id: 101, 
-    title: "Spend $100K for a SF ad campaign", 
-    status: "PASSED",
-    marketVolume: "$142.5k",
-    yesPrice: [1.1, 1.15, 1.12, 1.18, 1.16, 1.22, 1.20, 1.25, 1.24, 1.30, 1.28, 1.35, 1.32, 1.38, 1.40, 1.35, 1.42, 1.45, 1.44, 1.48], 
-    noPrice: [1.1, 1.08, 1.09, 1.05, 1.06, 1.02, 1.04, 1.00, 1.02, 0.98, 0.99, 0.95, 0.97, 0.94, 0.92, 0.95, 0.90, 0.88, 0.89, 0.85],
-    passChange: "+12.4%",
-    failChange: "-8.2%"
-  },
-  { 
-    id: 102, 
-    title: "Spend $50K to develop $KLED to CashApp/Venmo", 
-    status: "PASSED",
-    marketVolume: "$89.1k",
-    yesPrice: [1.4, 1.45, 1.42, 1.50, 1.48, 1.55, 1.52, 1.60, 1.58, 1.65, 1.62, 1.70, 1.68, 1.75, 1.72, 1.80, 1.78, 1.85, 1.82, 1.90],
-    noPrice: [1.4, 1.39, 1.41, 1.38, 1.40, 1.37, 1.38, 1.36, 1.37, 1.35, 1.36, 1.34, 1.35, 1.33, 1.34, 1.32, 1.33, 1.31, 1.32, 1.30],
-    passChange: "+24.8%",
-    failChange: "-2.1%"
-  }
-];
 
 // --- COMPONENTS ---
 
@@ -120,13 +109,38 @@ const REQUIRED_STAKE = 50000;
 
 export default function KledDashboard() {
   const router = useRouter();
-  const { isConnected } = useAccount();
+  const { isConnected, address } = useAccount();
+  const { switchChain } = useSwitchChain();
   const [price, setPrice] = useState<string | null>(null);
   const [isReadMore, setIsReadMore] = useState(false);
   // UPDATED: State to handle "Show All" logic
   const [showAllPast, setShowAllPast] = useState(false);
   const [mounted, setMounted] = useState(false);
   const currentTheme = useThemeObserver();
+
+  // --- GOVERNANCE HOOKS (Real Contract Data) ---
+  const {
+    formattedVotingPower,
+    votingPower,
+    isLoading: isGovernanceLoading,
+    isCorrectNetwork,
+    canCreateProposal
+  } = useUserGovernance();
+  const { isCorrectNetwork: networkOk, requiredChainName } = useChainCheck();
+
+  // Fetch ALL proposals from chain
+  const { proposals: allProposals, count: proposalCount, isLoading: isProposalsLoading } = useAllProposals();
+
+  // Fetch ALL futarchy treasury proposals from chain
+  const { proposals: futarchyProposals, count: futarchyCount, isLoading: isFutarchyLoading } = useAllFutarchyProposals();
+
+  // Separate proposals by status
+  const activeProposals = allProposals.filter(p => p.status === 'active');
+  const pendingProposals = allProposals.filter(p => p.status === 'pending');
+  const pastProposals = allProposals.filter(p => ['passed', 'failed', 'executed', 'canceled'].includes(p.status));
+
+  // Get latest active or pending proposal for main display
+  const latestProposal = activeProposals[0] || pendingProposals[0] || allProposals[0];
 
   // --- WIZARD STATE ---
   const [wizardStep, setWizardStep] = useState<number | null>(null);
@@ -376,8 +390,25 @@ export default function KledDashboard() {
           <ConnectButton.Custom>
             {({ account, openConnectModal }) => (
                 <span className="text-street-muted text-sm font-mono">
-                {account && account.isConnected ? (
-                    <span>Your Governance Power is <span className="text-street-green">15,420 KLED</span></span>
+                {account ? (
+                    !networkOk ? (
+                        <span className="flex items-center gap-2">
+                            Wrong network.
+                            <button
+                                onClick={() => switchChain?.({ chainId: REQUIRED_CHAIN_ID })}
+                                className="text-[var(--text-main)] underline hover:text-[#FD7DEC] transition cursor-pointer"
+                            >
+                                Switch to {requiredChainName}
+                            </button>
+                        </span>
+                    ) : isGovernanceLoading ? (
+                        <span className="flex items-center gap-2">
+                            <Loader2 className="animate-spin" size={14} />
+                            Loading governance power...
+                        </span>
+                    ) : (
+                        <span>Your Governance Power is <span className="text-street-green">{Number(formattedVotingPower).toLocaleString()} KLED</span></span>
+                    )
                 ) : (
                     <>
                         Please <button onClick={openConnectModal} type="button" className="text-[var(--text-main)] underline hover:text-[#FD7DEC] transition cursor-pointer">Log In</button> to view your governance power
@@ -495,62 +526,102 @@ export default function KledDashboard() {
                     <h2 className="text-4xl font-serif mb-4 tracking-tight text-[var(--text-main)]">Board Proposals</h2>
                 </div>
                 <div className="flex flex-col w-full px-6 gap-6 pb-8">
-                    {/* 1. UPCOMING PROPOSAL CARD */}
-                    <div className="w-full border street-border rounded-2xl p-6 bg-street-surface">
-                        <div className="flex items-center justify-between mb-6">
-                             <span className="text-[10px] font-bold text-street-muted tracking-widest uppercase flex items-center gap-2">
-                                <span className="w-2 h-2 rounded-full bg-street-muted"></span> Upcoming
-                             </span>
-                        </div>
-                        <h3 className="text-2xl font-serif text-[var(--text-main)] mb-4 leading-tight">Fire Avi Patel as CEO</h3>
-                        <ExpandableText text="This proposal discusses relieving Avi Patel, the current CEO from his active duties and reinstating the CEO role with Robert Chang as his replacement." />
-                        <div className="mt-4 pt-4 border-t street-border flex justify-between items-center">
-                             <span className="text-[10px] text-street-muted font-mono uppercase tracking-wider">Voting opens in 3 days</span>
-                             <Link href="/proposals/edit">
-                                <button className="border street-border rounded-lg px-4 py-2 text-[10px] text-[var(--text-main)] font-bold flex items-center gap-2 hover:bg-[var(--surface-highlight)] hover:text-[var(--text-main)] transition uppercase tracking-wider cursor-pointer">
-                                    Edit <ArrowRight size={10} className="-rotate-45" />
-                                </button>
-                             </Link>
-                        </div>
-                    </div>
-                    {/* 2. LIVE PROPOSAL CARD */}
-                    <div className="w-full border street-border rounded-2xl p-6 bg-street-surface">
-                        <div className="flex items-center justify-between mb-6">
-                             <span className="text-[10px] font-bold text-street-green tracking-widest uppercase flex items-center gap-2">
-                                <span className="w-1.5 h-1.5 rounded-full bg-street-green animate-pulse"></span> Live
-                             </span>
-                        </div>
-                        <h3 className="text-2xl font-serif text-[var(--text-main)] mb-4 leading-tight">Blame Wintermute</h3>
-                        <ExpandableText text="The Chart is down, we should find a reason to blame it on. This proposal discusses blaming Wintermute as the reason for it." />
-                        <div className="grid grid-cols-2 gap-4 mb-6">
-                            <div>
-                                <div className="flex justify-between mb-1">
-                                    <span className="text-[10px] text-[var(--text-main)] font-bold">Yes</span>
-                                    <span className="text-[10px] text-[#00C957] font-mono">60%</span>
-                                </div>
-                                <div className="h-1 w-full bg-[var(--border)] rounded-full overflow-hidden">
-                                    <div className="h-full street-green w-[60%] rounded-full"></div>
-                                </div>
+                    {/* 1. UPCOMING/PENDING PROPOSAL CARD - From Chain */}
+                    {pendingProposals.length > 0 ? (
+                        <div className="w-full border street-border rounded-2xl p-6 bg-street-surface">
+                            <div className="flex items-center justify-between mb-6">
+                                <span className="text-[10px] font-bold text-street-muted tracking-widest uppercase flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-street-muted"></span> Upcoming
+                                </span>
+                                <span className="text-[10px] font-mono text-street-muted">
+                                    #{pendingProposals[0].id.toString()}
+                                </span>
                             </div>
-                            <div>
-                                <div className="flex justify-between mb-1 items-end">
-                                    <span className="text-[10px] text-[var(--text-main)] font-bold">No</span>
-                                    <span className="text-[10px] text-[#FF4D4D] font-mono">20%</span>
-                                </div>
-                                <div className="h-1 w-full bg-[var(--border)] rounded-full overflow-hidden">
-                                    <div className="h-full street-red w-[20%] rounded-full"></div>
-                                </div>
+                            <h3 className="text-2xl font-serif text-[var(--text-main)] mb-4 leading-tight">
+                                {pendingProposals[0].title}
+                            </h3>
+                            <ExpandableText text={pendingProposals[0].description} />
+                            <div className="mt-4 pt-4 border-t street-border flex justify-between items-center">
+                                <span className="text-[10px] text-street-muted font-mono uppercase tracking-wider">
+                                    Voting opens {formatTimestamp(pendingProposals[0].startTime)}
+                                </span>
+                                <Link href={`/proposals/edit?id=${pendingProposals[0].id}`}>
+                                    <button className="border street-border rounded-lg px-4 py-2 text-[10px] text-[var(--text-main)] font-bold flex items-center gap-2 hover:bg-[var(--surface-highlight)] hover:text-[var(--text-main)] transition uppercase tracking-wider cursor-pointer">
+                                        Edit <ArrowRight size={10} className="-rotate-45" />
+                                    </button>
+                                </Link>
                             </div>
                         </div>
-                        <div className="pt-4 border-t street-border flex justify-between items-center gap-4">
-                             <p className="text-[10px] text-street-muted font-mono uppercase tracking-wider leading-tight max-w-[60%]">If passed forwarded to board</p>
-                             <Link href="/proposals/vote">
-                                <button className="border street-border rounded-lg px-6 py-2 text-[10px] text-[var(--text-main)] font-bold flex items-center gap-2 hover:bg-[var(--surface-highlight)] hover:text-[var(--text-main)] transition uppercase tracking-wider whitespace-nowrap cursor-pointer">
-                                    Vote Now <ArrowRight size={10} className="-rotate-45" />
-                                </button>
-                            </Link>
+                    ) : (
+                        <div className="w-full border street-border border-dashed rounded-2xl p-6 bg-street-surface/50 text-center">
+                            <p className="text-street-muted text-sm">No upcoming proposals</p>
+                            <p className="text-street-muted text-xs mt-1">Create a new proposal to get started</p>
                         </div>
-                    </div>
+                    )}
+                    {/* 2. LIVE PROPOSAL CARD - Real Contract Data */}
+                    {isProposalsLoading ? (
+                        <div className="w-full border street-border rounded-2xl p-6 bg-street-surface flex items-center justify-center min-h-[200px]">
+                            <Loader2 className="animate-spin text-street-muted" size={24} />
+                        </div>
+                    ) : latestProposal ? (
+                        <div className="w-full border street-border rounded-2xl p-6 bg-street-surface">
+                            <div className="flex items-center justify-between mb-6">
+                                <span className="text-[10px] font-bold text-street-green tracking-widest uppercase flex items-center gap-2">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-street-green animate-pulse"></span>
+                                    {Number(latestProposal.endTime) * 1000 > Date.now() ? 'Live' : 'Ended'}
+                                </span>
+                                <span className="text-[10px] font-mono text-street-muted">
+                                    #{latestProposal.id.toString()}
+                                </span>
+                            </div>
+                            <h3 className="text-2xl font-serif text-[var(--text-main)] mb-4 leading-tight">
+                                {latestProposal.title}
+                            </h3>
+                            <ExpandableText text={latestProposal.description} />
+                            {(() => {
+                                const totalVotes = latestProposal.forVotes + latestProposal.againstVotes + latestProposal.abstainVotes;
+                                const forPercent = totalVotes > 0n ? Number((latestProposal.forVotes * 100n) / totalVotes) : 0;
+                                const againstPercent = totalVotes > 0n ? Number((latestProposal.againstVotes * 100n) / totalVotes) : 0;
+                                return (
+                                    <div className="grid grid-cols-2 gap-4 mb-6">
+                                        <div>
+                                            <div className="flex justify-between mb-1">
+                                                <span className="text-[10px] text-[var(--text-main)] font-bold">Yes</span>
+                                                <span className="text-[10px] text-[#00C957] font-mono">{forPercent}%</span>
+                                            </div>
+                                            <div className="h-1 w-full bg-[var(--border)] rounded-full overflow-hidden">
+                                                <div className="h-full street-green rounded-full" style={{ width: `${forPercent}%` }}></div>
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="flex justify-between mb-1 items-end">
+                                                <span className="text-[10px] text-[var(--text-main)] font-bold">No</span>
+                                                <span className="text-[10px] text-[#FF4D4D] font-mono">{againstPercent}%</span>
+                                            </div>
+                                            <div className="h-1 w-full bg-[var(--border)] rounded-full overflow-hidden">
+                                                <div className="h-full street-red rounded-full" style={{ width: `${againstPercent}%` }}></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                            <div className="pt-4 border-t street-border flex justify-between items-center gap-4">
+                                <p className="text-[10px] text-street-muted font-mono uppercase tracking-wider leading-tight max-w-[60%]">
+                                    {latestProposal.executed ? 'Executed' : latestProposal.canceled ? 'Canceled' : 'If passed forwarded to board'}
+                                </p>
+                                <Link href={`/proposals/vote?id=${latestProposal.id}`}>
+                                    <button className="border street-border rounded-lg px-6 py-2 text-[10px] text-[var(--text-main)] font-bold flex items-center gap-2 hover:bg-[var(--surface-highlight)] hover:text-[var(--text-main)] transition uppercase tracking-wider whitespace-nowrap cursor-pointer">
+                                        Vote Now <ArrowRight size={10} className="-rotate-45" />
+                                    </button>
+                                </Link>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="w-full border street-border rounded-2xl p-6 bg-street-surface text-center">
+                            <p className="text-street-muted text-sm">No active proposals yet</p>
+                            <p className="text-street-muted text-xs mt-2">Be the first to create one!</p>
+                        </div>
+                    )}
                     {/* 3. MAKE YOUR VOICE HEARD */}
                     <button 
                         onClick={openWizard} 
@@ -569,63 +640,81 @@ export default function KledDashboard() {
                         </div>
                     </button>
                     
-                    {/* 4. PAST PROPOSALS (UPDATED WITH SEE ALL LOGIC) */}
+                    {/* 4. PAST PROPOSALS - FROM CHAIN */}
                     <div className="space-y-3 mt-2">
-                        <h4 className="text-sm font-serif text-street-muted text-center mb-2">Past Proposals</h4>
-                        
-                        {PAST_PROPOSALS.map((proposal, index) => {
-                            // LOGIC: Only show the first one. Blur the second one. Hide the rest until expanded.
-                            if (!showAllPast) {
-                                if (index > 1) return null; // Hide 3rd onwards
-                            }
-                            
-                            const isBlurred = !showAllPast && index === 1;
+                        <h4 className="text-sm font-serif text-street-muted text-center mb-2">
+                            Past Proposals {pastProposals.length > 0 && <span className="text-[10px] text-street-muted">({pastProposals.length})</span>}
+                        </h4>
 
-                            return (
-                                <div key={proposal.id} className="relative">
-                                    <div 
-                                        className={`bg-street-surface border street-border rounded-xl p-5 flex flex-col gap-4 transition-all duration-200 hover:border-street-muted/40 
-                                        ${isBlurred ? 'blur-sm opacity-50 select-none pointer-events-none' : ''}`}
-                                    >
-                                        <div className="flex justify-between items-start">
-                                            <div className="flex items-center gap-2">
-                                                <img src="/kled-logo.png" alt="Kled AI" className="h-3 w-3 rounded-full" />
-                                                <span className="text-[10px] text-street-muted uppercase tracking-wider">Kled AI, Inc.</span>
+                        {isProposalsLoading ? (
+                            <div className="flex items-center justify-center py-8">
+                                <Loader2 className="animate-spin text-street-muted" size={20} />
+                            </div>
+                        ) : pastProposals.length === 0 ? (
+                            <div className="text-center py-6 text-street-muted text-xs">
+                                No past proposals yet
+                            </div>
+                        ) : (
+                            pastProposals.map((proposal, index) => {
+                                // LOGIC: Only show the first one. Blur the second one. Hide the rest until expanded.
+                                if (!showAllPast && index > 1) return null;
+                                const isBlurred = !showAllPast && index === 1;
+                                const statusLabel = proposal.status.toUpperCase();
+                                const isPassed = proposal.status === 'passed' || proposal.status === 'executed';
+
+                                return (
+                                    <div key={proposal.id.toString()} className="relative">
+                                        <div
+                                            className={`bg-street-surface border street-border rounded-xl p-5 flex flex-col gap-4 transition-all duration-200 hover:border-street-muted/40
+                                            ${isBlurred ? 'blur-sm opacity-50 select-none pointer-events-none' : ''}`}
+                                        >
+                                            <div className="flex justify-between items-start">
+                                                <div className="flex items-center gap-2">
+                                                    <img src="/kled-logo.png" alt="Kled AI" className="h-3 w-3 rounded-full" />
+                                                    <span className="text-[10px] text-street-muted uppercase tracking-wider">
+                                                        #{proposal.id.toString()} • {formatTimestamp(proposal.endTime)}
+                                                    </span>
+                                                </div>
+                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider
+                                                    ${isPassed ? 'text-street-green bg-[#00C957]/10' : 'text-street-red bg-[#FF4D4D]/10'}`}>
+                                                    {statusLabel}
+                                                </span>
                                             </div>
-                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider 
-                                                ${proposal.status === 'PASSED' ? 'text-street-green bg-[#00C957]/10' : 'text-street-red bg-[#FF4D4D]/10'}`}>
-                                                {proposal.status}
-                                            </span>
+                                            <h4 className="text-lg font-serif text-[var(--text-main)] leading-tight">
+                                                {proposal.title}
+                                            </h4>
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-[9px] text-street-muted font-mono">
+                                                    {formatKled(proposal.forVotes)} For / {formatKled(proposal.againstVotes)} Against
+                                                </span>
+                                                <Link href={`/proposals/vote?id=${proposal.id}`}>
+                                                    <button className="bg-street-surface border street-border rounded px-4 py-1.5 text-[10px] text-[var(--text-main)] font-medium hover:bg-[var(--surface-highlight)] hover:text-[var(--text-main)] transition flex items-center gap-2">
+                                                        View <ArrowRight size={10} className="-rotate-45 text-street-muted" />
+                                                    </button>
+                                                </Link>
+                                            </div>
                                         </div>
-                                        <h4 className="text-lg font-serif text-[var(--text-main)] leading-tight">
-                                            {proposal.title}
-                                        </h4>
-                                        <div className="flex justify-end">
-                                            <button className="bg-street-surface border street-border rounded px-4 py-1.5 text-[10px] text-[var(--text-main)] font-medium hover:bg-[var(--surface-highlight)] hover:text-[var(--text-main)] transition flex items-center gap-2">
-                                                View <ArrowRight size={10} className="-rotate-45 text-street-muted" />
-                                            </button>
-                                        </div>
-                                    </div>
 
-                                    {/* "SEE ALL" BUTTON OVERLAY */}
-                                    {isBlurred && (
-                                        <div className="absolute inset-0 z-20 flex items-center justify-center">
-                                            <button 
-                                                onClick={() => setShowAllPast(true)}
-                                                className="bg-street-background border street-border text-[var(--text-main)] px-6 py-2 rounded-full text-xs font-bold uppercase tracking-wider hover:bg-[var(--surface-highlight)] hover:scale-105 transition-all shadow-2xl cursor-pointer z-30"
-                                            >
-                                                See All
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
+                                        {/* "SEE ALL" BUTTON OVERLAY */}
+                                        {isBlurred && (
+                                            <div className="absolute inset-0 z-20 flex items-center justify-center">
+                                                <button
+                                                    onClick={() => setShowAllPast(true)}
+                                                    className="bg-street-background border street-border text-[var(--text-main)] px-6 py-2 rounded-full text-xs font-bold uppercase tracking-wider hover:bg-[var(--surface-highlight)] hover:scale-105 transition-all shadow-2xl cursor-pointer z-30"
+                                                >
+                                                    See All
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })
+                        )}
 
                         {/* OPTIONAL: Collapse Button if expanded */}
-                        {showAllPast && PAST_PROPOSALS.length > 2 && (
+                        {showAllPast && pastProposals.length > 2 && (
                             <div className="text-center pt-2">
-                                <button 
+                                <button
                                     onClick={() => setShowAllPast(false)}
                                     className="text-[10px] text-street-muted hover:text-[var(--text-main)] uppercase tracking-wider underline"
                                 >
@@ -639,45 +728,73 @@ export default function KledDashboard() {
 
             {/* Column 3: Treasury & Distribution - FUTARCHY INTEGRATION */}
             <div className="flex flex-col border-r street-border">
-                {/* TREASURY PROPOSALS SECTION */}
+                {/* TREASURY PROPOSALS SECTION - Real Contract Data */}
                 <div className="p-8 border-b street-border flex flex-col items-center text-center">
                     <h2 className="text-4xl font-serif mb-6 text-[var(--text-main)]">Futarchy Treasury</h2>
                     <div className="w-full space-y-4">
-                        {TREASURY_PROPOSALS.map((prop) => (
-                            <div key={prop.id} className="bg-street-surface border street-border rounded-xl p-4 text-left hover:border-street-muted/40 transition-all">
-                                <div className="flex justify-between items-start mb-3">
-                                    <div className="space-y-1">
-                                        <h3 className="text-sm font-serif text-[var(--text-main)] leading-tight">{prop.title}</h3>
-                                        <div className="flex items-center gap-2 text-[10px] text-street-muted">
-                                            <span className="text-street-green uppercase font-bold tracking-wider">{prop.status}</span>
-                                            <span>•</span>
-                                            <span>Vol: {prop.marketVolume}</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="space-y-3">
-                                    <div className="space-y-1">
-                                        <div className="flex justify-between text-[9px] font-bold uppercase tracking-wider text-street-green">
-                                            <span>If Pass</span>
-                                            <span>{prop.passChange}</span>
-                                        </div>
-                                        <Sparkline data={prop.yesPrice} colorClass="text-[#4ade80]" />
-                                    </div>
-                                    <div className="space-y-1 pt-1">
-                                        <div className="flex justify-between text-[9px] font-bold uppercase tracking-wider text-street-red">
-                                            <span>If Fail</span>
-                                            <span>{prop.failChange}</span>
-                                        </div>
-                                        <Sparkline data={prop.noPrice} colorClass="text-[#f87171]" />
-                                    </div>
-                                </div>
-                                <div className="mt-4 pt-3 border-t street-border flex justify-end">
-                                    <button className="text-[10px] font-bold text-[var(--text-main)] uppercase tracking-wider flex items-center gap-1 hover:opacity-70 transition">
-                                        View Market <ArrowRight size={10} className="-rotate-45" />
-                                    </button>
-                                </div>
+                        {isFutarchyLoading ? (
+                            <div className="flex items-center justify-center py-8">
+                                <Loader2 className="animate-spin text-street-muted" size={24} />
                             </div>
-                        ))}
+                        ) : futarchyProposals.length === 0 ? (
+                            <div className="bg-street-surface border street-border border-dashed rounded-xl p-6 text-center">
+                                <p className="text-street-muted text-sm mb-2">No treasury proposals yet</p>
+                                <Link href="/treasury">
+                                    <button className="text-[10px] font-bold text-[var(--text-main)] uppercase tracking-wider flex items-center gap-1 hover:opacity-70 transition mx-auto">
+                                        Create Proposal <ArrowRight size={10} className="-rotate-45" />
+                                    </button>
+                                </Link>
+                            </div>
+                        ) : (
+                            futarchyProposals.map((prop) => (
+                                <div key={prop.id.toString()} className="bg-street-surface border street-border rounded-xl p-4 text-left hover:border-street-muted/40 transition-all">
+                                    <div className="flex justify-between items-start mb-3">
+                                        <div className="space-y-1">
+                                            <h3 className="text-sm font-serif text-[var(--text-main)] leading-tight">{prop.title}</h3>
+                                            <div className="flex items-center gap-2 text-[10px] text-street-muted">
+                                                <span className={`uppercase font-bold tracking-wider ${
+                                                    prop.status === 'active' ? 'text-street-green' :
+                                                    prop.status === 'passed' || prop.status === 'executed' ? 'text-street-green' :
+                                                    'text-street-red'
+                                                }`}>{prop.status}</span>
+                                                <span>•</span>
+                                                <span>Amt: {prop.formattedAmount} KLED</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-3">
+                                        <div className="space-y-1">
+                                            <div className="flex justify-between text-[9px] font-bold uppercase tracking-wider text-street-green">
+                                                <span>Pass Price</span>
+                                                <span>{formatPriceAsPercent(prop.passPrice)}</span>
+                                            </div>
+                                            <div className="h-2 w-full bg-[var(--border)] rounded-full overflow-hidden">
+                                                <div className="h-full bg-street-green rounded-full" style={{ width: `${Number(prop.passPrice) / 1e16}%` }}></div>
+                                            </div>
+                                        </div>
+                                        <div className="space-y-1 pt-1">
+                                            <div className="flex justify-between text-[9px] font-bold uppercase tracking-wider text-street-red">
+                                                <span>Fail Price</span>
+                                                <span>{formatPriceAsPercent(prop.failPrice)}</span>
+                                            </div>
+                                            <div className="h-2 w-full bg-[var(--border)] rounded-full overflow-hidden">
+                                                <div className="h-full bg-street-red rounded-full" style={{ width: `${Number(prop.failPrice) / 1e16}%` }}></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="mt-4 pt-3 border-t street-border flex justify-between items-center">
+                                        <span className="text-[9px] text-street-muted font-mono">
+                                            {prop.timeRemaining > 0 ? `${formatTimeRemaining(prop.timeRemaining)} left` : 'Market ended'}
+                                        </span>
+                                        <Link href={`/treasury?id=${prop.id}`}>
+                                            <button className="text-[10px] font-bold text-[var(--text-main)] uppercase tracking-wider flex items-center gap-1 hover:opacity-70 transition">
+                                                View Market <ArrowRight size={10} className="-rotate-45" />
+                                            </button>
+                                        </Link>
+                                    </div>
+                                </div>
+                            ))
+                        )}
                     </div>
                 </div>
                 {/* Distribution Proposals */}

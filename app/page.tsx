@@ -7,9 +7,23 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import PhysicsFooter from '@/components/PhysicsFooter';
 import ThemeToggle from '@/components/ThemeToggle';
+import { useProposalCount } from '@/app/hooks/useGovernance';
 
-// Mock Data for Projects (SPVs)
-const PROJECTS = [
+// Project data - status and proposal count fetched from chain
+interface Project {
+  id: string;
+  name: string;
+  ticker: string;
+  logo: string;
+  description: string;
+  status: 'LIVE' | 'DRAFTING' | 'UPCOMING';
+  treasury: string;
+  members: number;
+  tags: string[];
+  link: string | null;
+}
+
+const STATIC_PROJECTS: Omit<Project, 'proposals'>[] = [
   {
     id: "kled",
     name: "Kled AI, Inc.",
@@ -19,9 +33,8 @@ const PROJECTS = [
     status: "LIVE",
     treasury: "$2.4M",
     members: 1240,
-    proposals: 12,
     tags: ["AI", "Data", "Infrastructure"],
-    link: null // Handled via click handler for transition
+    link: null
   },
   {
     id: "opendroids",
@@ -32,9 +45,8 @@ const PROJECTS = [
     status: "DRAFTING",
     treasury: "$0",
     members: 15,
-    proposals: 0,
     tags: ["Robotics", "AI", "Hardware"],
-    link: "#" 
+    link: "#"
   }
 ];
 
@@ -42,7 +54,16 @@ export default function AllProjects() {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState("All");
-  
+
+  // Fetch real proposal count from chain
+  const { data: proposalCount, isLoading: isCountLoading } = useProposalCount();
+
+  // Build projects with real data
+  const PROJECTS = STATIC_PROJECTS.map(p => ({
+    ...p,
+    proposals: p.id === 'kled' ? (proposalCount ? Number(proposalCount) : 0) : 0,
+  }));
+
   // Transition State
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [transitionMessage, setTransitionMessage] = useState("Connecting to SPV");
@@ -243,7 +264,7 @@ export default function AllProjects() {
                                 ))}
                             </div>
                         </div>
-                        <div className="pt-6 border-t border-gray-50 grid grid-cols-2 gap-4">
+                        <div className="pt-6 border-t border-gray-50 grid grid-cols-3 gap-4">
                             <div>
                                 <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">Treasury</p>
                                 <p className="text-sm font-bold text-gray-900 mt-1">{project.treasury}</p>
@@ -252,6 +273,12 @@ export default function AllProjects() {
                                 <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">Members</p>
                                 <p className="text-sm font-bold text-gray-900 mt-1 flex items-center gap-1">
                                     <Users size={14} className="text-gray-400"/> {project.members}
+                                </p>
+                            </div>
+                            <div>
+                                <p className="text-[10px] uppercase tracking-widest text-gray-400 font-bold">Proposals</p>
+                                <p className="text-sm font-bold text-gray-900 mt-1">
+                                    {isCountLoading && project.id === 'kled' ? '...' : project.proposals}
                                 </p>
                             </div>
                         </div>
