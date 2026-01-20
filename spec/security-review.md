@@ -81,8 +81,8 @@ This document tracks security findings from architecture review and threat model
 | SEC-028 | **CRITICAL** | No TWAP Implementation - Uses Spot Price | **RESOLVED** | FutarchyAMM | FutarchyAMM.sol:137-147,473-546 | 2026-01-20 | 2026-01-20 |
 | SEC-029 | High | CEI Violation in sell() | **RESOLVED** | FutarchyAMM | FutarchyAMM.sol:293-321 | 2026-01-20 | 2026-01-20 |
 | SEC-030 | High | Missing Deadline Parameter | **RESOLVED** | FutarchyAMM | FutarchyAMM.sol:245-251,293-300 | 2026-01-20 | 2026-01-20 |
-| SEC-031 | High | No Resolution Delay | **CONFIRMED** | FutarchyAMM | FutarchyAMM.sol:345-365 | 2026-01-20 | - |
-| SEC-032 | High | Cancel Allowed During Active Trading | **CONFIRMED** | FutarchyTreasury | FutarchyTreasury.sol:567-593 | 2026-01-20 | - |
+| SEC-031 | High | No Resolution Delay | **RESOLVED** | FutarchyTreasury | FutarchyTreasury.sol:432-435 | 2026-01-20 | 2026-01-20 |
+| SEC-032 | High | Cancel Allowed During Active Trading | **RESOLVED** | FutarchyTreasury | FutarchyTreasury.sol:575-585 | 2026-01-20 | 2026-01-20 |
 | SEC-033 | Medium | Missing Minimum Trade/Split Amount | **CONFIRMED** | Multiple | Multiple | 2026-01-20 | - |
 | SEC-034 | Medium | Unsafe transferFrom (not safeTransferFrom) | **CONFIRMED** | FutarchyTreasury | FutarchyTreasury.sol:276 | 2026-01-20 | - |
 | SEC-035 | Medium | ETH Transfer Reentrancy Risk | **CONFIRMED** | FutarchyTreasury | FutarchyTreasury.sol | 2026-01-20 | - |
@@ -1988,12 +1988,12 @@ kledToken.safeTransferFrom(msg.sender, address(this), proposalStake);
 | Severity | Total | Open | Resolved | Won't Fix |
 |----------|-------|------|----------|-----------|
 | Critical | 10 | 7 | 3 | 0 |
-| High | 11 | 9 | 2 | 0 |
+| High | 11 | 7 | 4 | 0 |
 | Medium | 12 | 12 | 0 | 0 |
 | Low | 3 | 3 | 0 | 0 |
 | Informational | 0 | 0 | 0 | 0 |
 
-**Total Findings: 36 (5 Resolved, 31 Open)**
+**Total Findings: 36 (7 Resolved, 29 Open)**
 
 ### By Component
 
@@ -2154,3 +2154,4 @@ kledToken.safeTransferFrom(msg.sender, address(this), proposalStake);
 | 2026-01-20 | SEC | Added 13 Futarchy findings (SEC-013 to SEC-025), total 25 findings |
 | 2026-01-20 | SEC | **CODE REVIEW**: Added 11 confirmed findings from Futarchy contracts (SEC-026 to SEC-036). 3 CRITICAL, 4 HIGH confirmed. |
 | 2026-01-20 | SEC | **FIXES APPLIED**: Resolved 5 findings (SEC-026, SEC-027, SEC-028, SEC-029, SEC-030). Added ReentrancyGuard to ConditionalTokens.sol, implemented TWAP in FutarchyAMM.sol, added deadline parameters to buy/sell, fixed CEI violations. All 274 tests passing. |
+| 2026-01-20 | SEC | **FIXES APPLIED**: Resolved 2 more findings (SEC-031, SEC-032). Added closingDelay (1hr default) to prevent front-running closeTrading. Restricted proposer cancel to before any trades occur. All 338 tests passing. |

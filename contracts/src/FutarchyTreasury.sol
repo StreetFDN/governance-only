@@ -51,6 +51,8 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
     error PassDidNotWin();
     error NoClearWinner();
     error TooEarly();
+    error TradingAlreadyStarted();
+    error ClosingDelayNotPassed();
 
     // =============================================================
     //                           ENUMS
@@ -179,6 +181,7 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
     uint256 public minLiquidity;          // 10,000 KLED default
     uint48 public tradingPeriod;          // 7 days default
     uint48 public resolutionDelay;        // 30 days default
+    uint48 public closingDelay;           // 1 hour default (SEC-031 fix)
     uint256 public minPriceThreshold;     // 5500 = 55% threshold
 
     // Proposal storage
@@ -235,6 +238,7 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
         minLiquidity = 10_000e18;
         tradingPeriod = 7 days;
         resolutionDelay = 30 days;
+        closingDelay = 1 hours;    // SEC-031: Delay between trading end and close
         minPriceThreshold = 5500; // 55%
     }
 
@@ -423,12 +427,15 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
 
     /**
      * @notice Close trading for a proposal
+     * @dev SEC-031 fix: Requires closingDelay after tradingEnd to prevent front-running
      * @param proposalId Proposal to close
      */
     function closeTrading(uint256 proposalId) external nonReentrant {
         FutarchyProposal storage proposal = proposals[proposalId];
         if (proposal.state != ProposalState.Active) revert InvalidState();
         if (block.timestamp < proposal.tradingEnd) revert TooEarly();
+        // SEC-031: Add delay between trading end and close to prevent front-running
+        if (block.timestamp < proposal.tradingEnd + _getClosingDelay()) revert ClosingDelayNotPassed();
 
         proposal.state = ProposalState.Closed;
 
@@ -562,18 +569,27 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
 
     /**
      * @notice Cancel a proposal
+     * @dev SEC-032 fix: Proposer can only cancel before any trades occur
      * @param proposalId Proposal to cancel
      */
     function cancelProposal(uint256 proposalId) external nonReentrant {
         FutarchyProposal storage proposal = proposals[proposalId];
 
-        // Proposer can cancel during Active
-        // Guardian can cancel during Active or Closed
+        // Proposer can cancel during Active ONLY if no trades have occurred
+        // Guardian can cancel during Active or Closed (emergency power)
         bool isProposer = msg.sender == proposal.proposer;
         bool isGuardian = msg.sender == guardian;
 
         if (proposal.state == ProposalState.Active) {
-            if (!isProposer && !isGuardian) revert NotProposer();
+            if (isProposer) {
+                // SEC-032: Proposer can only cancel if no trading has occurred
+                // Trading has occurred if collateral > initial liquidity
+                if (proposalCollateral[proposalId] > proposal.initialLiquidity) {
+                    revert TradingAlreadyStarted();
+                }
+            } else if (!isGuardian) {
+                revert NotProposer();
+            }
         } else if (proposal.state == ProposalState.Closed) {
             if (!isGuardian) revert OnlyGuardian();
         } else {
@@ -670,6 +686,14 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
         resolutionDelay = delay;
     }
 
+    /**
+     * @notice Set closing delay (governance only)
+     * @dev SEC-031: Delay between trading end and when closeTrading can be called
+     */
+    function setClosingDelay(uint48 delay) external onlyGuardian {
+        closingDelay = delay;
+    }
+
     // =============================================================
     //                    VIEW FUNCTIONS
     // =============================================================
@@ -715,6 +739,11 @@ contract FutarchyTreasury is Initializable, UUPSUpgradeable, ReentrancyGuard, Pa
     function _getResolutionDelay() internal view returns (uint48) {
         if (testMode) return 1 hours;
         return resolutionDelay;
+    }
+
+    function _getClosingDelay() internal view returns (uint48) {
+        if (testMode) return 1 minutes;  // Short delay for testing
+        return closingDelay;
     }
 
     // =============================================================
